@@ -286,21 +286,52 @@ def build_program(cols: int, rows: int, binding: str, style: str) -> list[Fold]:
 # ---------------------------------------------------------------------------
 
 
+def inset_leaf_slots(sheets: int, leaves_per_sheet: int) -> list[list[int]]:
+    """套帖（inset）叶序：返回每张纸的各叶在整帖叶序中的位置（0 基）。
+
+    外层纸包住内层纸：第 0 张的前半叶在书帖最外，后半叶在最内层纸之后。
+    例：2 张 × 8 叶 -> 张0 叶位 [0..3, 12..15]，张1 叶位 [4..11]，
+    即外层纸承载第 1-8、25-32 页，内层纸承载第 9-24 页。
+    """
+    slots: list[list[int]] = [[] for _ in range(sheets)]
+    pos = 0
+    for s in range(sheets - 1):  # 外层到次内层的前半叶
+        for _ in range(leaves_per_sheet // 2):
+            slots[s].append(pos)
+            pos += 1
+    for _ in range(leaves_per_sheet):  # 最内层全部叶
+        slots[sheets - 1].append(pos)
+        pos += 1
+    for s in range(sheets - 2, -1, -1):  # 次内层到外层 的后半叶
+        for _ in range(leaves_per_sheet // 2, leaves_per_sheet):
+            slots[s].append(pos)
+            pos += 1
+    return slots
+
+
+def make_leaf_pages(leaves: int, page_base: int, total_pages: int) -> list[tuple]:
+    """顺序叶页码表（单张帖用）：[(奇页, 偶页), ...]，超出总页数为 None。"""
+    def num(n: int) -> int | None:
+        return n if n <= total_pages else None
+
+    return [
+        (num(page_base + 2 * k + 1), num(page_base + 2 * k + 2))
+        for k in range(leaves)
+    ]
+
+
 def generate_layout(
     cols: int,
     rows: int,
     program: list[Fold],
-    page_base: int,
-    total_pages: int,
+    leaf_pages: list[tuple],
 ) -> dict:
     """生成平面拼版：{位置: Layer}，每个位置一层，正面朝上。
 
-    page_base: 本张纸起始页码（0 基）；超过 total_pages 的页为空白页(None)。
+    leaf_pages: 折好状态下从外到内各叶的 (奇数页, 偶数页)，None 为空白页。
     """
     pages_per_sheet = cols * rows * 2
-
-    def num(n: int) -> int | None:
-        return n if n <= total_pages else None
+    assert len(leaf_pages) == pages_per_sheet // 2
 
     # 1) 符号化正向折叠（只跟踪正反面朝向与翻面奇偶，不赋页码）
     state = {
