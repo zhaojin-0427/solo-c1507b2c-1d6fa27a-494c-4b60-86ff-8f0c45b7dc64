@@ -8,7 +8,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import __version__
-from .errors import DomainError
+from .errors import DomainError, err
 from .models import ComputeRequest, JobInput, SavePlanRequest
 from .planner import generate_candidates
 from .service import (
@@ -18,7 +18,14 @@ from .service import (
     resolve_selection,
     selection_fingerprint,
 )
-from .storage import PlanStore
+from .sewing import (
+    compute_candidates as sewing_candidates,
+    sewing_fingerprint,
+    snapshot_from_plan,
+)
+from .sewing_models import SaveSewingPlanRequest, SewingParams
+from .sewing_svg import render_all_templates, render_signature_template
+from .storage import PlanStore, SewingStore
 from .svg import render_overview, render_sheet_side
 
 
@@ -28,7 +35,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
         version=__version__,
         description="供小批量书籍装订师核对折帖与配页的印张拼版服务",
     )
-    app.state.store = PlanStore(db_path or os.environ.get("IMPOSITION_DB", "imposition.db"))
+    db = db_path or os.environ.get("IMPOSITION_DB", "imposition.db")
+    app.state.store = PlanStore(db)
+    app.state.sewing_store = SewingStore(db)
 
     @app.exception_handler(DomainError)
     async def domain_error_handler(_: Request, exc: DomainError) -> JSONResponse:

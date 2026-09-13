@@ -14,6 +14,8 @@ from .folding import (
     _mirror_pos,
     build_program,
     generate_layout,
+    inset_leaf_slots,
+    make_leaf_pages,
     verify_layout,
 )
 from .models import JobInput, Rect, SignatureSpec
@@ -198,12 +200,16 @@ def build_sheet(
     job: JobInput,
     spec: SignatureSpec,
     sheet_index: int,
-    page_base: int,
+    leaf_pages: list[tuple],
     program: list[Fold],
     printable: Rect,
     creep_offset: float,
 ) -> dict:
-    """生成一张印张的正反面拼版（含爬移补偿后的坐标）。"""
+    """生成一张印张的正反面拼版（含爬移补偿后的坐标）。
+
+    leaf_pages: 本张纸各叶的 (奇数页, 偶数页)，由 build_signature 按
+    单张顺序或套帖叶序（inset_leaf_slots）分配。
+    """
     per_sheet = spec.pages // spec.sheets
     cols, rows = GRIDS[per_sheet]
     cw, ch = job.page.width, job.page.height
@@ -212,8 +218,8 @@ def build_sheet(
     ox = printable.x + (printable.width - grid_w) / 2
     oy = printable.y + (printable.height - grid_h) / 2
 
-    layout = generate_layout(cols, rows, program, page_base, job.total_pages)
-    ver = verify_layout(layout, program, page_base, job.total_pages)
+    layout = generate_layout(cols, rows, program, leaf_pages)
+    ver = verify_layout(layout, program, leaf_pages)
     if not ver["ok"]:
         raise DomainError(
             [err("UPSIDE_DOWN", f"印张 {sheet_index + 1} 存在倒页或页序错误")]
@@ -327,12 +333,16 @@ def build_signature(
     oy = printable.y + (printable.height - grid_h) / 2
 
     # 逐张生成（爬移：最外层张不动，内层逐张向书脊补偿 纸厚×层深）
+    # 整帖叶页码表 -> 各张纸的叶位（单张帖为顺序叶，套帖为 inset 叶序）
+    all_leaves = make_leaf_pages(spec.pages // 2, page_base, job.total_pages)
+    slots = inset_leaf_slots(spec.sheets, per_sheet // 2)
     sheets = []
     blanks = 0
     for s in range(spec.sheets):
         offset = (spec.sheets - 1 - s) * job.paper.thickness
-        base = page_base + s * per_sheet
-        sheet = build_sheet(job, spec, s, base, program, printable, offset)
+        sheet = build_sheet(
+            job, spec, s, [all_leaves[i] for i in slots[s]], program, printable, offset
+        )
         blanks += sum(
             1
             for side in ("front", "back")

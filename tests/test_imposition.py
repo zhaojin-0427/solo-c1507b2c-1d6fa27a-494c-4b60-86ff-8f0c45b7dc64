@@ -112,6 +112,27 @@ def test_creep_bleed_warning():
     assert any("出血不足" in w for w in plan["validation"]["warnings"])
 
 
+def test_inset_sheet_pagination():
+    """32 页帖 2 张套帖：外层张承载 1-8、25-32 页，内层张承载 9-24 页。"""
+    job = make_job(
+        total_pages=64,
+        signature_options=[{"pages": 32, "style": "standard", "sheets": 2}],
+    )
+    plan = compute_plan(job, resolve_selection(job, 0, None))
+    sig = plan["signatures"][0]
+
+    def pages_of(sheet):
+        return sorted(
+            c["page"]
+            for side in ("front", "back")
+            for c in sheet[side]["cells"]
+        )
+
+    assert pages_of(sig["sheets"][0]) == [1, 2, 3, 4, 5, 6, 7, 8,
+                                          25, 26, 27, 28, 29, 30, 31, 32]
+    assert pages_of(sig["sheets"][1]) == list(range(9, 25))
+
+
 def test_blank_pages_in_last_signature():
     """末帖空白页：34 页 = 16+16+8，末帖 8 页中 6 页空白。"""
     job = make_job(total_pages=34, signature_options=[

@@ -345,13 +345,14 @@ def generate_layout(
     # 每个原始页格在正向折叠中的翻面奇偶（爬移方向映射用）
     parities = {layer.cell: (layer.pv, layer.ph) for layer in stack}
 
-    # 2) 在折好状态下按阅读顺序赋页码：顶→底依次为奇数页朝上、偶数页朝下
+    # 2) 在折好状态下按阅读顺序赋页码：顶→底依次为各叶的奇数页朝上、偶数页朝下
     for k, layer in enumerate(stack):
         up_face = layer.front if layer.up == "F" else layer.back
         down_face = layer.back if layer.up == "F" else layer.front
-        up_face.page = num(page_base + 2 * k + 1)
+        recto, verso = leaf_pages[k]
+        up_face.page = recto
         up_face.head = HEAD_UP
-        down_face.page = num(page_base + 2 * k + 2)
+        down_face.page = verso
         down_face.head = HEAD_UP
 
     # 3) 反向展开回平面
@@ -370,11 +371,11 @@ def generate_layout(
 def verify_layout(
     layout: dict,
     program: list[Fold],
-    page_base: int,
-    total_pages: int,
+    leaf_pages: list[tuple],
 ) -> dict:
     """正向折叠生成的拼版，校验阅读顺序与页面朝向（倒页检查）。
 
+    leaf_pages: 与 generate_layout 相同的叶页码表，作为阅读顺序的期望。
     返回 {"ok": bool, "reading_order": [...], "upside_down": [...]}。
     """
     state = {pos: [layer] for pos, layer in layout.items()}
@@ -385,14 +386,10 @@ def verify_layout(
 
     reading_order = []
     upside_down = []
-    pages_per_sheet = len(stack) * 2
     for k, layer in enumerate(stack):
         up_face = layer.front if layer.up == "F" else layer.back
         down_face = layer.back if layer.up == "F" else layer.front
-        expected_up = page_base + 2 * k + 1
-        expected_down = page_base + 2 * k + 2
-        exp_up = expected_up if expected_up <= total_pages else None
-        exp_down = expected_down if expected_down <= total_pages else None
+        exp_up, exp_down = leaf_pages[k]
         reading_order.append(
             {
                 "leaf": k + 1,
