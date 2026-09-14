@@ -82,8 +82,14 @@ def compute_collating(
         top = _outermost_layer(program, cols, rows)
         r, c = top.cell
         grid_w, grid_h = cols * cw, rows * ch
-        ox = printable.x + (printable.width - grid_w) / 2
-        oy = printable.y + (printable.height - grid_h) / 2
+        if job.presswork_active():
+            from . import presswork
+
+            # 第 0 份书帖单元的平面原点（与印版构造一致）
+            ox, oy, _, _ = presswork.half_origin(job, spec, printable)
+        else:
+            ox = printable.x + (printable.width - grid_w) / 2
+            oy = printable.y + (printable.height - grid_h) / 2
         x0, y0 = ox + c * cw, oy + r * ch
 
         col = i // cfg.per_column
@@ -118,10 +124,32 @@ def compute_collating(
             rot_front = 270 if not top.pv else 90
 
         side = "front" if top.up == "F" else "back"
-        # 套用爬移后即为该面制版坐标；背面视角 x 镜像、爬移 dx 反向
+        # 套用爬移后即为该面制版坐标。
+        # 书版式背面 = 绕垂直轴看背面（x 镜像）；翻身版/天地翻坐标统一在
+        # 共用印版第 1 过版纸框（正面视角）内，背面内容按翻纸轴镜像。
         mx += dx
         my += dy
-        if side == "back":
+        if job.presswork_active():
+            from . import presswork
+
+            axis = presswork.turn_axis(job)
+            # (mx,my) 是折好状态书脊标记反算到抽象页格正面（F 面）的位置。
+            # 若标记在 B 面：在单元0 局部正面坐标系内作轴向镜像
+            # （与 build_plate_cells 中背面内容的正面像同一几何）。
+            if side == "back":
+                if axis == "V":
+                    u0x = 2 * ox + grid_w - mx - mw
+                    u0y = my
+                else:
+                    u0x = mx
+                    u0y = 2 * oy + grid_h - my - mh
+            else:
+                u0x, u0y = mx, my
+            base_x, base_y = u0x, u0y
+            base_rot = (360 - rot_front) % 360 if side == "back" else rot_front
+            out_x, out_rot = base_x, base_rot
+            out_creep = {"dx": r3(dx), "dy": r3(dy)}
+        elif side == "back":
             out_x = job.paper.width - mx - mw
             out_rot = (360 - rot_front) % 360
             out_creep = {"dx": r3(-dx), "dy": r3(dy)}
@@ -149,6 +177,25 @@ def compute_collating(
             "rotation": out_rot,
             "creep": out_creep,
         }
+        if job.presswork_active():
+            from . import presswork
+
+            # 共用印版上的两份配帖标：第 0 份位于单元0（正面视角坐标），
+            # 第 1 份为沿翻纸轴镜像的孪生位置（两次过版各落到一份书帖书脊）。
+            fx, fy = base_x, base_y
+            fw, fh = mw, mh
+            frot = base_rot
+            if presswork.turn_axis(job) == "V":
+                tx, ty = job.paper.width - fx - fw, fy
+            else:
+                tx, ty = fx, job.paper.height - fy - fh
+            trot = (360 - frot) % 360
+            mark["plate_positions"] = [
+                {"copy": 0, "unit": 0, "x": r3(fx), "y": r3(fy),
+                 "width": r3(fw), "height": r3(fh), "rotation": frot},
+                {"copy": 1, "unit": 1, "x": r3(tx), "y": r3(ty),
+                 "width": r3(fw), "height": r3(fh), "rotation": trot},
+            ]
         marks.append(mark)
 
         # --- 冲突检测（按帖序，首个违规即首个冲突） ---
@@ -184,7 +231,9 @@ def compute_collating(
                 )
         placed.append(cur)
 
-        # 套准标记碰撞：该面坐标系下，标记矩形外扩 (安全余量+十字半径) 后含十字心
+        # 套准标记碰撞：在抽象页格正面坐标系下，标记矩形外扩
+        # (安全余量+十字半径) 后含单元0 四角十字心（书版式背面按 x 镜像）。
+        # 翻身版/天地翻共用印版的单元1 与单元0 关于翻纸轴对称，只需验单元0。
         off = job.bleed_mm + job.marks_margin_mm / 2
         reg = [
             (ox - off, oy - off),
@@ -192,12 +241,13 @@ def compute_collating(
             (ox - off, oy + grid_h + off),
             (ox + grid_w + off, oy + grid_h + off),
         ]
-        if side == "back":
+        if not job.presswork_active() and side == "back":
             reg = [(job.paper.width - rx, ry) for rx, ry in reg]
         k = cfg.safety_mm + REGISTER_MARK_RADIUS_MM
+        chk_x, chk_y = (mx, my) if job.presswork_active() else (out_x, my)
         if any(
-            out_x - k - EPS <= rx <= out_x + mw + k + EPS
-            and my - k - EPS <= ry <= my + mh + k + EPS
+            chk_x - k - EPS <= rx <= chk_x + mw + k + EPS
+            and chk_y - k - EPS <= ry <= chk_y + mh + k + EPS
             for rx, ry in reg
         ):
             conflict(

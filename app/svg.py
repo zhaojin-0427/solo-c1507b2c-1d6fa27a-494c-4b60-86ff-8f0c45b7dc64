@@ -94,29 +94,42 @@ def _panel(result: dict, sig: dict, sheet: dict, side: str, s: float, dy: float)
     ph = paper_h * s + TITLE_H + 2 * PAD
     ox = PAD
     oy = dy + TITLE_H + PAD
-    side_text = "正面" if side == "front" else "背面"
-    title = (
-        f"帖{sig['index'] + 1} · 印张{sheet['index'] + 1} · {side_text}"
-        f"（{sig['spec']['pages']}页/{sig['spec']['style']}，爬移 {sheet['creep_offset_mm']}mm）"
-    )
+    pw_info = sheet.get("presswork")
+    if pw_info is not None:
+        pass_no = 1 if side == "front" else 2
+        pmeta = pw_info["passes"][pass_no - 1]
+        side_text = f"第{pass_no}次过版（共用印版 {pw_info['plate_id']}）"
+        title = (
+            f"帖{sig['index'] + 1} · 印张{sheet['index'] + 1} · {side_text}"
+            f"（{pw_info['mode']}，翻纸轴：{'垂直' if pw_info['turn_axis']=='vertical' else '水平'}，"
+            f"咬口 {pmeta['gripper_edge']}，侧规 {pmeta['side_lay_edge']}）"
+        )
+    else:
+        side_text = "正面" if side == "front" else "背面"
+        title = (
+            f"帖{sig['index'] + 1} · 印张{sheet['index'] + 1} · {side_text}"
+            f"（{sig['spec']['pages']}页/{sig['spec']['style']}，爬移 {sheet['creep_offset_mm']}mm）"
+        )
     el = [
         f'<text x="{_f(PAD)}" y="{_f(dy + TITLE_H * 0.75)}" font-size="13" '
         f'font-family="sans-serif" fill="#222">{_esc(title)}</text>',
         f'<rect x="{_f(ox)}" y="{_f(oy)}" width="{_f(paper_w * s)}" height="{_f(paper_h * s)}" '
         f'fill="#fff" stroke="#333" stroke-width="1"/>',
     ]
-    # 可印区域
-    job_obj = JobInput(**job)
-    pr = effective_printable(job_obj)
+    # 可印区域（翻身版取当前过版的可印区域）
+    if pw_info is not None:
+        pr = pw_info["passes"][pass_no - 1]["printable"]
+    else:
+        pr = effective_printable(JobInput(**job)).model_dump()
     el.append(
-        f'<rect x="{_f(ox + pr.x * s)}" y="{_f(oy + pr.y * s)}" width="{_f(pr.width * s)}" '
-        f'height="{_f(pr.height * s)}" fill="none" stroke="#999" stroke-width="0.6" '
-        f'stroke-dasharray="5,3"/>'
+        f'<rect x="{_f(ox + pr["x"] * s)}" y="{_f(oy + pr["y"] * s)}" '
+        f'width="{_f(pr["width"] * s)}" height="{_f(pr["height"] * s)}" '
+        f'fill="none" stroke="#999" stroke-width="0.6" stroke-dasharray="5,3"/>'
     )
-    # 咬口
+    # 咬口（书版式按任务配置；翻身版按当前过版的咬口边）
     g = job["press"]["gripper_mm"]
     if g > 0:
-        edge = job["press"]["gripper_edge"]
+        edge = pmeta["gripper_edge"] if pw_info is not None else job["press"]["gripper_edge"]
         if edge == "bottom":
             gx, gy, gw, gh = 0, paper_h - g, paper_w, g
         elif edge == "top":
@@ -133,42 +146,110 @@ def _panel(result: dict, sig: dict, sheet: dict, side: str, s: float, dy: float)
             f'<text x="{_f(ox + (gx + gw / 2) * s)}" y="{_f(oy + (gy + gh / 2) * s)}" '
             f'font-size="9" fill="#c00" text-anchor="middle" font-family="sans-serif">咬口</text>'
         )
-    # 折线（仅正面）
-    if side == "front":
-        for fl in sheet["fold_lines"]:
-            if fl["axis"] == "V":
-                x = ox + fl["at_mm"] * s
-                el.append(
-                    f'<line x1="{_f(x)}" y1="{_f(oy)}" x2="{_f(x)}" y2="{_f(oy + paper_h * s)}" '
-                    f'stroke="#e63946" stroke-width="0.7" stroke-dasharray="6,3"/>'
-                )
-                el.append(
-                    f'<text x="{_f(x + 2)}" y="{_f(oy + 10)}" font-size="9" fill="#e63946" '
-                    f'font-family="sans-serif">折{fl["step"]}</text>'
-                )
-            else:
-                y = oy + fl["at_mm"] * s
-                el.append(
-                    f'<line x1="{_f(ox)}" y1="{_f(y)}" x2="{_f(ox + paper_w * s)}" y2="{_f(y)}" '
-                    f'stroke="#e63946" stroke-width="0.7" stroke-dasharray="6,3"/>'
-                )
-                el.append(
-                    f'<text x="{_f(ox + 2)}" y="{_f(y + 10)}" font-size="9" fill="#e63946" '
-                    f'font-family="sans-serif">折{fl["step"]}</text>'
-                )
+    # 侧规（翻身版/天地翻：蓝色窄条，位于当前过版靠规边）
+    if pw_info is not None:
+        sl = pmeta["side_lay_edge"]
+        swd = 3.0
+        if sl == "left":
+            slx, sly, slw, slh = 0, 0, swd, paper_h
+        elif sl == "right":
+            slx, sly, slw, slh = paper_w - swd, 0, swd, paper_h
+        elif sl == "top":
+            slx, sly, slw, slh = 0, 0, paper_w, swd
+        else:
+            slx, sly, slw, slh = 0, paper_h - swd, paper_w, swd
+        el.append(
+            f'<rect x="{_f(ox + slx * s)}" y="{_f(oy + sly * s)}" width="{_f(slw * s)}" '
+            f'height="{_f(slh * s)}" fill="#1d6fd1" fill-opacity="0.45" stroke="none"/>'
+        )
+        lx = ox + (slx + slw / 2) * s + (10 if sl in ("left", "right") else 0)
+        ly = oy + (sly + slh / 2) * s
+        el.append(
+            f'<text x="{_f(lx)}" y="{_f(ly)}" font-size="9" fill="#1d6fd1" '
+            f'text-anchor="middle" font-family="sans-serif">侧规</text>'
+        )
+    # 中缝裁切线 + 翻纸轴（翻身版/天地翻，两次过版都标出）
+    if pw_info is not None:
+        cut = pw_info["cut_line"]
+        caxis = cut["axis"]
+        tip = (
+            f"中缝裁切（{'竖切' if caxis == 'vertical' else '横切'}），"
+            f"裁切余量 {cut['gutter_trim_mm']}mm；翻纸轴"
+            f"（{'垂直' if caxis == 'vertical' else '水平'}）"
+        )
+        if caxis == "vertical":
+            cx = ox + cut["at_mm"] * s
+            el.append(
+                f'<g><title>{_esc(tip)}</title>'
+                f'<line x1="{_f(cx)}" y1="{_f(oy)}" x2="{_f(cx)}" '
+                f'y2="{_f(oy + paper_h * s)}" stroke="#7b2cbf" stroke-width="1.2" '
+                f'stroke-dasharray="8,3"/></g>'
+            )
+            el.append(
+                f'<text x="{_f(cx + 3)}" y="{_f(oy + paper_h * s - 4)}" font-size="9" '
+                f'fill="#7b2cbf" font-family="sans-serif">中缝/翻纸轴</text>'
+            )
+        else:
+            cy = oy + cut["at_mm"] * s
+            el.append(
+                f'<g><title>{_esc(tip)}</title>'
+                f'<line x1="{_f(ox)}" y1="{_f(cy)}" x2="{_f(ox + paper_w * s)}" '
+                f'y2="{_f(cy)}" stroke="#7b2cbf" stroke-width="1.2" '
+                f'stroke-dasharray="8,3"/></g>'
+            )
+            el.append(
+                f'<text x="{_f(ox + 4)}" y="{_f(cy - 3)}" font-size="9" '
+                f'fill="#7b2cbf" font-family="sans-serif">中缝/翻纸轴</text>'
+            )
+    # 折线：书版式仅正面；翻身版按当前过版所属份（第1过版=份0，第2过版=份1）
+    if pw_info is None:
+        fold_iter = list(sheet["fold_lines"]) if side == "front" else []
+    else:
+        fold_iter = [
+            fl for fl in sheet["fold_lines"]
+            if fl.get("copy") == (0 if pass_no == 1 else 1)
+        ]
+    for fl in fold_iter:
+        if fl["axis"] == "V":
+            x = ox + fl["at_mm"] * s
+            el.append(
+                f'<line x1="{_f(x)}" y1="{_f(oy)}" x2="{_f(x)}" y2="{_f(oy + paper_h * s)}" '
+                f'stroke="#e63946" stroke-width="0.7" stroke-dasharray="6,3"/>'
+            )
+            el.append(
+                f'<text x="{_f(x + 2)}" y="{_f(oy + 10)}" font-size="9" fill="#e63946" '
+                f'font-family="sans-serif">折{fl["step"]}</text>'
+            )
+        else:
+            y = oy + fl["at_mm"] * s
+            el.append(
+                f'<line x1="{_f(ox)}" y1="{_f(y)}" x2="{_f(ox + paper_w * s)}" y2="{_f(y)}" '
+                f'stroke="#e63946" stroke-width="0.7" stroke-dasharray="6,3"/>'
+            )
+            el.append(
+                f'<text x="{_f(ox + 2)}" y="{_f(y + 10)}" font-size="9" fill="#e63946" '
+                f'font-family="sans-serif">折{fl["step"]}</text>'
+            )
     # 页格
     for cell in sheet[side]["cells"]:
         el.extend(_cell_elements(cell, s, ox, oy))
-    # 套准标记
-    for m in sheet["marks"]:
+    # 套准标记（翻身版第 2 过版用翻转后坐标）
+    marks = sheet.get("back_marks", sheet["marks"]) if side == "back" else sheet["marks"]
+    for m in marks:
         el.append(_mark(ox + m["x"] * s, oy + m["y"] * s, s))
     # 书脊配帖标（该帖最外层印张的对应面）
     for cm in result.get("collating_marks", {}).get("marks", []):
-        if (
-            cm["signature"] == sig["index"]
-            and cm["sheet"] == sheet["index"]
-            and cm["side"] == side
-        ):
+        if cm["signature"] != sig["index"] or cm["sheet"] != sheet["index"]:
+            continue
+        if pw_info is not None and "plate_positions" in cm:
+            # 共用印版：两次过版视图分别绘制单元0 / 单元1 的孪生标记
+            want_unit = 0 if side == "front" else 1
+            for pos in cm["plate_positions"]:
+                if pos["unit"] == want_unit:
+                    twin = dict(cm)
+                    twin.update(pos)
+                    el.append(_collating_mark(twin, s, ox, oy))
+        elif cm["side"] == side:
             el.append(_collating_mark(cm, s, ox, oy))
     return el, pw, ph
 

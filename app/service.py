@@ -12,6 +12,7 @@ from .imposition import (
     effective_printable,
     validate_plan_pages,
 )
+from . import presswork
 from .models import JobInput, SignatureSpec
 from .planner import generate_candidates, plan_metrics
 
@@ -22,10 +23,18 @@ def canonical_json(obj) -> str:
 
 
 def job_dump(job: JobInput) -> dict:
-    """任务序列化：未配置配帖标时剔除该键，保持旧响应与哈希不变。"""
+    """任务序列化：未配置项剔除对应键，保持旧响应与哈希不变。
+
+    - 未配置配帖标时剔除 collating_marks；
+    - 未启用翻身版/天地翻时剔除全部过版字段（presswork_mode 等）。
+    """
     d = job.model_dump(mode="json")
     if d.get("collating_marks") is None:
         d.pop("collating_marks", None)
+    if not job.presswork_active():
+        for k in ("presswork_mode", "target_copies", "side_lay_edge",
+                  "gutter_trim_mm"):
+            d.pop(k, None)
     return d
 
 
@@ -82,6 +91,72 @@ def resolve_selection(
     return [SignatureSpec(**s) for s in chosen["signatures"]]
 
 
+def presswork_summary(job: JobInput, signatures_out: list[dict]) -> dict:
+    """汇总翻身版/天地翻的过版信息：印版数、过版次数、用纸量、成品帖数、超印。
+
+    每张全张一块共用印版、两次过版，沿中缝出两份书帖。目标册数为奇数时
+    末批只需要一份，另一份为超印量（overrun_copies 列出）。
+    """
+    plates = []
+    sheet_count = 0
+    for sig in signatures_out:
+        for sheet in sig["sheets"]:
+            pw = sheet["presswork"]
+            sheet_count += 1
+            plate_id = f"S{sig['index'] + 1}-P{sheet['index'] + 1}"
+            pw["plate_id"] = plate_id  # 回填共用印版号到逐张块
+            plates.append(
+                {
+                    "plate_id": plate_id,
+                    "signature": sig["index"],
+                    "sheet": sheet["index"],
+                    "mode": pw["mode"],
+                    "turn_axis": pw["turn_axis"],
+                    "shared_plate": True,
+                    "flip_matrix": pw["flip_matrix"],
+                    "cut_line": pw["cut_line"],
+                    "passes": pw["passes"],
+                }
+            )
+    target = job.target_copies if job.target_copies is not None else 1
+    # 每张全张经两次过版出 2 份书帖；一次开印即整批过版（共 sheet_count 张全张）。
+    # 目标为奇数时末批超印 1 份（overrun_copies 列出）。
+    batches = (target + 1) // 2
+    paper_sheets = batches * sheet_count
+    printed_copies = batches * 2
+    overrun = printed_copies - target
+    # 成品帖数：每个书帖位置产出 printed_copies 份成品书帖
+    signature_kinds = len(signatures_out)
+    finished_signatures = min(printed_copies, target) * signature_kinds
+    return {
+        "mode": job.presswork_mode.value,
+        "turn_axis": "vertical" if presswork.turn_axis(job) == "V" else "horizontal",
+        "side_lay_edge_pass1": job.effective_side_lay(),
+        "side_lay_edge_pass2": (
+            job.effective_side_lay()
+            if job.presswork_mode.value == "work_and_tumble"
+            else {
+                "left": "right", "right": "left",
+                "top": "bottom", "bottom": "top",
+            }[job.effective_side_lay()]
+        ),
+        "target_copies": target,
+        "plate_count": sheet_count,
+        "pass_count": paper_sheets * 2,
+        "paper_sheets": paper_sheets,
+        "paper_area_mm2": round(
+            paper_sheets * job.paper.width * job.paper.height, 1
+        ),
+        "finished_signatures": finished_signatures,
+        "printed_copies": min(printed_copies, target) if overrun == 0 else target,
+        "overrun_copies": (
+            [{"target": target, "printed": printed_copies, "extra": overrun}]
+            if overrun else []
+        ),
+        "plates": plates,
+    }
+
+
 def compute_plan(job: JobInput, signatures: list[SignatureSpec]) -> dict:
     """计算完整拼版方案。任何拒绝条件（越界/倒页/重页/缺页/纸纹）抛 DomainError。"""
     printable = effective_printable(job)
@@ -104,7 +179,7 @@ def compute_plan(job: JobInput, signatures: list[SignatureSpec]) -> dict:
         signatures_out.append(sig)
         cursor += spec.pages
 
-    page_errors = validate_plan_pages(signatures_out, job.total_pages)
+    page_errors = validate_plan_pages(job, signatures_out, job.total_pages)
     if page_errors:
         raise DomainError(page_errors)
 
@@ -126,6 +201,8 @@ def compute_plan(job: JobInput, signatures: list[SignatureSpec]) -> dict:
     }
     if collating is not None:
         result["collating_marks"] = collating
+    if job.presswork_active():
+        result["presswork"] = presswork_summary(job, signatures_out)
     result["input_hash"] = hashlib.sha256(
         (
             job_fingerprint(job) + ":" + selection_fingerprint(signatures)

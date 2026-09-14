@@ -18,6 +18,7 @@ from .folding import (
     make_leaf_pages,
     verify_layout,
 )
+from . import presswork
 from .models import JobInput, Rect, SignatureSpec
 
 EPS = 1e-9
@@ -95,14 +96,30 @@ def check_spec(job: JobInput, spec: SignatureSpec) -> list[dict]:
     grid_w = cols * job.page.width
     grid_h = rows * job.page.height
     margin = job.bleed_mm + job.marks_margin_mm
-    need_w = grid_w + 2 * margin
-    need_h = grid_h + 2 * margin
     pr = effective_printable(job)
+    if job.presswork_active():
+        # 一帖两本：两份成品网格 + 中缝（两份出血 + 裁切余量）+ 外侧标记余量，
+        # 须落在两次过版可印区域交集（关于纸张中心对称）
+        axis = presswork.turn_axis(job)
+        pr = presswork.combined_printable(job, pr)
+        gutter = 2 * job.bleed_mm + job.gutter_trim_mm
+        margin = job.bleed_mm + job.marks_margin_mm
+        if axis == "V":
+            need_w = 2 * grid_w + gutter + 2 * margin
+            need_h = grid_h + 2 * margin
+        else:
+            need_w = grid_w + 2 * margin
+            need_h = 2 * grid_h + gutter + 2 * margin
+        label = "翻身版" if axis == "V" else "天地翻"
+    else:
+        need_w = grid_w + 2 * margin
+        need_h = grid_h + 2 * margin
+        label = ""
     if need_w > pr.width + EPS or need_h > pr.height + EPS:
         errors.append(
             err(
                 "OUT_OF_PRINTABLE",
-                f"{spec.pages} 页帖（{spec.style.value}）所需区域 "
+                f"{label}{spec.pages} 页帖（{spec.style.value}）所需区域 "
                 f"{r3(need_w)}×{r3(need_h)}mm 超出可印区域 "
                 f"{r3(pr.width)}×{r3(pr.height)}mm",
             )
@@ -209,14 +226,15 @@ def build_sheet(
 
     leaf_pages: 本张纸各叶的 (奇数页, 偶数页)，由 build_signature 按
     单张顺序或套帖叶序（inset_leaf_slots）分配。
+
+    翻身版/天地翻（job.presswork_active()）：全张只有一块共用印版，
+    两次过版；front/back 分别为第 1/第 2 过版装纸纸框视图，另附 presswork
+    块给出翻纸轴、装纸方向、翻转矩阵、共用印版号、中缝与逐格坐标。
     """
     per_sheet = spec.pages // spec.sheets
     cols, rows = GRIDS[per_sheet]
     cw, ch = job.page.width, job.page.height
     grid_w, grid_h = cols * cw, rows * ch
-    margin = job.bleed_mm + job.marks_margin_mm
-    ox = printable.x + (printable.width - grid_w) / 2
-    oy = printable.y + (printable.height - grid_h) / 2
 
     layout = generate_layout(cols, rows, program, leaf_pages)
     ver = verify_layout(layout, program, leaf_pages)
@@ -224,6 +242,16 @@ def build_sheet(
         raise DomainError(
             [err("UPSIDE_DOWN", f"印张 {sheet_index + 1} 存在倒页或页序错误")]
         )
+
+    if job.presswork_active():
+        return _build_presswork_sheet(
+            job, spec, sheet_index, leaf_pages, program, printable,
+            creep_offset, layout, ver, cols, rows, cw, ch, grid_w, grid_h,
+        )
+
+    margin = job.bleed_mm + job.marks_margin_mm
+    ox = printable.x + (printable.width - grid_w) / 2
+    oy = printable.y + (printable.height - grid_h) / 2
 
     binding = job.binding.value
     axis = spine_axis(binding)
@@ -312,6 +340,63 @@ def build_sheet(
     }
 
 
+def _build_presswork_sheet(
+    job, spec, sheet_index, leaf_pages, program, printable,
+    creep_offset, layout, ver, cols, rows, cw, ch, grid_w, grid_h,
+) -> dict:
+    """翻身版/天地翻单张：一块共用印版，两次过版，沿中缝裁开一帖两本。"""
+    sig_index = sheet_index  # 仅用于错误信息时由调用方覆盖，这里取张序
+    axis = presswork.turn_axis(job)
+    ox, oy, hw, hh = presswork.half_origin(job, spec, printable)
+    cells1 = presswork.build_plate_cells(job, spec, layout, creep_offset, ox, oy)
+    cells2 = presswork.pass2_cells(job, cells1)
+    marks1, marks2 = presswork.plate_marks(job, ox, oy, hw, hh)
+    passes = presswork.pass_printables(job, printable)
+    geom_errors = presswork.validate_geometry(
+        job, sheet_index, cells1, cells2, passes
+    )
+    if geom_errors:
+        raise DomainError(geom_errors)
+    copies = presswork.verify_copies(job, spec, layout, leaf_pages)
+    if copies["errors"]:
+        raise DomainError(copies["errors"])
+    fold_lines = presswork.plate_fold_lines(job, program, ox, oy)
+    cut = presswork.cut_line(job)
+    mode = job.presswork_mode.value
+    return {
+        "index": sheet_index,
+        "creep_offset_mm": r3(creep_offset),
+        "grid": {"cols": 2 * cols if axis == "V" else cols,
+                 "rows": rows if axis == "V" else 2 * rows},
+        # front = 第 1 过版视图，back = 第 2 过版装纸视图
+        "front": {"cells": cells1},
+        "back": {"cells": cells2},
+        "marks": marks1,
+        "back_marks": marks2,
+        "fold_lines": fold_lines,
+        "reading_order": copies["copy0"],
+        "presswork": {
+            "mode": mode,
+            "turn_axis": "vertical" if axis == "V" else "horizontal",
+            "shared_plate": True,
+            "plate_id": f"P{sheet_index + 1}",
+            "flip_matrix": presswork.flip_matrix(job),
+            "cut_line": cut,
+            "half_origin": {"x": r3(ox), "y": r3(oy),
+                            "width": r3(hw), "height": r3(hh)},
+            "passes": passes,
+            "pass1_cells": cells1,
+            "pass2_cells": cells2,
+            "pass1_marks": marks1,
+            "pass2_marks": marks2,
+            "copies": [
+                {"copy": 0, "reading_order": copies["copy0"]},
+                {"copy": 1, "reading_order": copies["copy1"]},
+            ],
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # 折帖
 # ---------------------------------------------------------------------------
@@ -329,8 +414,15 @@ def build_signature(
     program = build_program(cols, rows, job.binding.value, spec.style.value)
     cw, ch = job.page.width, job.page.height
     grid_w, grid_h = cols * cw, rows * ch
-    ox = printable.x + (printable.width - grid_w) / 2
-    oy = printable.y + (printable.height - grid_h) / 2
+
+    active = job.presswork_active()
+    axis = presswork.turn_axis(job) if active else None
+    if active:
+        # 第 0 份书帖单元原点（与 _build_presswork_sheet 一致）
+        ox, oy, _, _ = presswork.half_origin(job, spec, printable)
+    else:
+        ox = printable.x + (printable.width - grid_w) / 2
+        oy = printable.y + (printable.height - grid_h) / 2
 
     # 逐张生成（爬移：最外层张不动，内层逐张向书脊补偿 纸厚×层深）
     # 整帖叶页码表 -> 各张纸的叶位（单张帖为顺序叶，套帖为 inset 叶序）
@@ -343,23 +435,57 @@ def build_signature(
         sheet = build_sheet(
             job, spec, s, [all_leaves[i] for i in slots[s]], program, printable, offset
         )
-        blanks += sum(
-            1
-            for side in ("front", "back")
-            for cell in sheet[side]["cells"]
-            if cell["page"] is None
-        )
+        if active:
+            # 一份书帖的空白页：只统计第 0 份各抽象页格的 F 面（unit0 第 1 过版）
+            # 与 B 面（unit1 第 2 过版落第 0 份正面），与书版式正/反面一一对应
+            blanks += sum(
+                1
+                for cell in sheet["presswork"]["pass1_cells"]
+                if cell["pass1"]["copy"] == 0 and cell["page"] is None
+            )
+            blanks += sum(
+                1
+                for cell in sheet["presswork"]["pass2_cells"]
+                if cell["pass1"]["copy"] == 1 and cell["page"] is None
+            )
+        else:
+            blanks += sum(
+                1
+                for side in ("front", "back")
+                for cell in sheet[side]["cells"]
+                if cell["page"] is None
+            )
         sheets.append(sheet)
 
-    # 折叠 / 裁切工序（同一帖各张相同）
+    # 折叠 / 裁切工序（同一帖各张相同；坐标取第 0 份书帖单元）
     raw_steps, edges = simulate_packet(program, cols, rows)
     fold_steps = []
+    step_no = 0
+    if active:
+        # 两次过版后先沿中缝裁开（一帖两本），再各自折叠
+        step_no += 1
+        cut = presswork.cut_line(job)
+        fold_steps.append(
+            {
+                "step": step_no,
+                "type": "cut",
+                "axis": cut["axis"],
+                "line_mm": cut["at_mm"],
+                "gutter_trim_mm": cut["gutter_trim_mm"],
+                "action": (
+                    "沿垂直中缝裁开，得到两份相同书帖"
+                    if cut["axis"] == "vertical"
+                    else "沿水平中缝裁开，得到两份相同书帖"
+                ),
+            }
+        )
     for i, st in enumerate(raw_steps, 1):
         f: Fold = st["fold"]
         c0, r0, c1, r1 = st["rect"]
+        step_no += 1
         fold_steps.append(
             {
-                "step": i,
+                "step": step_no,
                 "type": "fold",
                 "axis": "vertical" if f.axis == "V" else "horizontal",
                 "action": MOVING_TEXT[f.moving],
@@ -373,7 +499,7 @@ def build_signature(
             }
         )
     trims = []
-    n = len(fold_steps)
+    n = step_no
     binding = job.binding.value
     for side in ("top", "right", "bottom", "left"):
         if side == binding:
@@ -382,9 +508,10 @@ def build_signature(
         name = EDGE_NAMES[side]
         if binding in ("left", "right") and side in ("left", "right"):
             name = "前口"
+        n += 1
         trims.append(
             {
-                "step": n + len(trims) + 1,
+                "step": n,
                 "type": "trim",
                 "edge": side,
                 "opens_fold": opens,
@@ -430,11 +557,26 @@ def build_signature(
 # ---------------------------------------------------------------------------
 
 
-def validate_plan_pages(signatures: list[dict], total_pages: int) -> list[dict]:
-    """汇总全案页码，检查重页与缺页。返回错误列表。"""
+def validate_plan_pages(
+    job: JobInput | None, signatures: list[dict], total_pages: int
+) -> list[dict]:
+    """汇总全案页码，检查重页与缺页。返回错误列表。
+
+    翻身版/天地翻同一印版两次过版各印一份书帖，只按第 0 份的页码统计：
+    unit0 第 1 过版落第 0 份正面，unit1 第 2 过版落第 0 份正面（实为其背面）。
+    """
     seen: dict[int, int] = {}
     for sig in signatures:
         for sheet in sig["sheets"]:
+            if job is not None and job.presswork_active():
+                # 第 0 份：第 1 过版取 unit0 正面；其背面在第 2 过版时由 unit1 落上
+                for cell in sheet["presswork"]["pass1_cells"]:
+                    if cell["unit"] == 0 and cell["page"] is not None:
+                        seen[cell["page"]] = seen.get(cell["page"], 0) + 1
+                for cell in sheet["presswork"]["pass2_cells"]:
+                    if cell["unit"] == 1 and cell["page"] is not None:
+                        seen[cell["page"]] = seen.get(cell["page"], 0) + 1
+                continue
             for side in ("front", "back"):
                 for cell in sheet[side]["cells"]:
                     p = cell["page"]

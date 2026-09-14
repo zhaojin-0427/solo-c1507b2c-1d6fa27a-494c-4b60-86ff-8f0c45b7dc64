@@ -61,6 +61,35 @@ def create_app(db_path: str | None = None) -> FastAPI:
             "grids": {str(k): {"cols": v[0], "rows": v[1]} for k, v in GRIDS.items()},
             "styles": {str(k): sorted(v) for k, v in STYLES.items()},
             "binding_edges": ["left", "right", "top", "bottom"],
+            "presswork_modes": [
+                {
+                    "mode": "sheetwise",
+                    "label": "书版式",
+                    "turn_axis": None,
+                    "copies_per_sheet": 1,
+                    "cut_axis": None,
+                },
+                {
+                    "mode": "work_and_turn",
+                    "label": "翻身版",
+                    "turn_axis": "vertical",
+                    "copies_per_sheet": 2,
+                    "cut_axis": "vertical",
+                    "gripper_edge": ["top", "bottom"],
+                    "side_lay": "swaps edge between passes",
+                    "bindings": ["left", "right"],
+                },
+                {
+                    "mode": "work_and_tumble",
+                    "label": "天地翻",
+                    "turn_axis": "horizontal",
+                    "copies_per_sheet": 2,
+                    "cut_axis": "horizontal",
+                    "gripper_edge": ["left", "right"],
+                    "side_lay": "same edge both passes",
+                    "bindings": ["top", "bottom"],
+                },
+            ],
             "units": "mm",
         }
 
@@ -175,15 +204,51 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     @app.get("/api/plans/{plan_id}/export")
     def plan_export(plan_id: str) -> dict:
-        """制版用 JSON：每张印张正反面的页码、旋转与坐标（含配帖标）。"""
+        """制版用 JSON：每张印张正反面的页码、旋转与坐标（含配帖标）。
+
+        翻身版/天地翻：每张全张一块共用印版，plates 按"过版"分条（每块两条），
+        各条标注翻纸轴、咬口、侧规、翻转矩阵与中缝裁切线。
+        """
         row = _load(plan_id)
         if row is None:
             return JSONResponse(status_code=404, content={"detail": "方案不存在"})
         result = json.loads(row["result_json"])
         collating = result.get("collating_marks")
         plates = []
+        press_active = "presswork" in result
         for sig in result["signatures"]:
             for sheet in sig["sheets"]:
+                if press_active:
+                    pw = sheet["presswork"]
+                    for pass_no, cells_key, marks_key in (
+                        (1, "pass1_cells", "pass1_marks"),
+                        (2, "pass2_cells", "pass2_marks"),
+                    ):
+                        pmeta = pw["passes"][pass_no - 1]
+                        plate = {
+                            "signature": sig["index"],
+                            "sheet": sheet["index"],
+                            "impression": pass_no,
+                            "presswork_mode": pw["mode"],
+                            "shared_plate_id": pw["plate_id"],
+                            "shared_plate": True,
+                            "turn_axis": pw["turn_axis"],
+                            "flip_matrix": pw["flip_matrix"],
+                            "cut_line": pw["cut_line"],
+                            "gripper_edge": pmeta["gripper_edge"],
+                            "side_lay_edge": pmeta["side_lay_edge"],
+                            "printable": pmeta["printable"],
+                            "loading": {
+                                "pass": pass_no,
+                                "gripper_edge": pmeta["gripper_edge"],
+                                "side_lay_edge": pmeta["side_lay_edge"],
+                            },
+                            "creep_offset_mm": sheet["creep_offset_mm"],
+                            "marks": pw[marks_key],
+                            "pages": pw[cells_key],
+                        }
+                        plates.append(plate)
+                    continue
                 for side in ("front", "back"):
                     plate = {
                         "signature": sig["index"],
@@ -210,6 +275,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
             "coordinate_origin": "paper top-left, x right, y down; back side viewed from back",
             "plates": plates,
         }
+        if press_active:
+            out["coordinate_origin"] = (
+                "paper top-left in each impression frame, x right, y down"
+            )
+            out["presswork"] = {
+                k: v for k, v in result["presswork"].items() if k != "plates"
+            }
         if collating is not None:
             out["collating_marks"] = {
                 "spine_length_mm": collating["spine_length_mm"],

@@ -48,6 +48,28 @@ class GripperEdge(str, Enum):
     right = "right"
 
 
+class SideLayEdge(str, Enum):
+    """侧规（靠规）所在纸边：印刷进纸时侧向对齐的纸边。"""
+
+    top = "top"
+    bottom = "bottom"
+    left = "left"
+    right = "right"
+
+
+class PressworkMode(str, Enum):
+    """过版方式（印张翻纸方式）。
+
+    sheetwise     书版式：正反两块印版，两次过版（缺省，旧行为）；
+    work_and_turn 翻身版：同一印版，绕垂直轴翻转 180°，中缝竖切，一帖两本；
+    work_and_tumble 天地翻：同一印版，绕水平轴翻转 180°，中缝横切，一帖两本。
+    """
+
+    sheetwise = "sheetwise"
+    work_and_turn = "work_and_turn"
+    work_and_tumble = "work_and_tumble"
+
+
 # ---------------------------------------------------------------------------
 # 基础结构
 # ---------------------------------------------------------------------------
@@ -167,6 +189,25 @@ class JobInput(BaseModel):
     collating_marks: Optional[CollatingMarksConfig] = Field(
         default=None, description="书脊配帖标配置（缺省不生成，行为与旧版一致）"
     )
+    # 翻身版 / 天地翻（缺省全部按书版式计算，哈希与旧版一致）
+    presswork_mode: PressworkMode = Field(
+        default=PressworkMode.sheetwise,
+        description="过版方式：sheetwise 书版式 / work_and_turn 翻身版 / work_and_tumble 天地翻",
+    )
+    target_copies: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="目标册数（翻身版/天地翻用：奇数时末张只出一本，列出超印量）",
+    )
+    side_lay_edge: Optional[SideLayEdge] = Field(
+        default=None,
+        description="侧规边（首次过版靠规边；缺省时由咬口边与过版方式推导）",
+    )
+    gutter_trim_mm: float = Field(
+        default=0.0,
+        ge=0,
+        description="中缝裁切余量 mm：两份书帖之间在出血外另留的净刀距",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "JobInput":
@@ -181,7 +222,48 @@ class JobInput(BaseModel):
             raise ValueError(
                 f"锁定折帖共 {locked_pages} 页，超过总页数 {self.total_pages}"
             )
+        # 咬口边与侧规边必须互相垂直（侧规是进纸侧向定位，不能与咬口同边或对边）
+        if self.side_lay_edge is not None:
+            g = self.press.gripper_edge.value
+            sl = self.side_lay_edge.value
+            horiz = {"top", "bottom"}
+            if (g in horiz) == (sl in horiz):
+                raise ValueError(
+                    f"侧规边 {sl} 与咬口边 {g} 必须互相垂直"
+                )
+        # 翻身版绕垂直轴：咬口边保持上下边，侧规换边；天地翻绕水平轴：咬口换边
+        g_edge = self.press.gripper_edge.value
+        if self.presswork_mode == PressworkMode.work_and_turn:
+            if g_edge not in ("top", "bottom"):
+                raise ValueError(
+                    "翻身版（绕垂直轴翻转）要求咬口位于上边或下边"
+                )
+            if self.binding not in (BindingEdge.left, BindingEdge.right):
+                raise ValueError(
+                    "翻身版仅适用于左/右装订（书脊平行于翻纸轴）"
+                )
+        elif self.presswork_mode == PressworkMode.work_and_tumble:
+            if g_edge not in ("left", "right"):
+                raise ValueError(
+                    "天地翻（绕水平轴翻转）要求咬口位于左边或右边"
+                )
+            if self.binding not in (BindingEdge.top, BindingEdge.bottom):
+                raise ValueError(
+                    "天地翻仅适用于天头/地脚装订（书脊平行于翻纸轴）"
+                )
         return self
+
+    def presswork_active(self) -> bool:
+        """是否启用一帖两本过版（非书版式）。"""
+        return self.presswork_mode != PressworkMode.sheetwise
+
+    def effective_side_lay(self) -> str:
+        """有效侧规边：显式指定优先；缺省时取咬口顺时针的相邻边。"""
+        if self.side_lay_edge is not None:
+            return self.side_lay_edge.value
+        return {"bottom": "left", "top": "left", "left": "bottom", "right": "bottom"}[
+            self.press.gripper_edge.value
+        ]
 
 
 # ---------------------------------------------------------------------------
