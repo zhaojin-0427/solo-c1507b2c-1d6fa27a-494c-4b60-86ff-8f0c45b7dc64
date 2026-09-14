@@ -5,6 +5,7 @@ import hashlib
 import json
 
 from .errors import DomainError, err
+from .collating import compute_collating
 from .imposition import (
     build_signature,
     check_spec,
@@ -95,6 +96,13 @@ def compute_plan(job: JobInput, signatures: list[SignatureSpec]) -> dict:
     if page_errors:
         raise DomainError(page_errors)
 
+    # 书脊配帖标：冲突（越出书脊/侵入安全区/重叠/碰套准标）定位帖号并拒绝
+    collating = None
+    if job.collating_marks is not None:
+        collating, coll_errors = compute_collating(job, signatures, printable)
+        if coll_errors:
+            raise DomainError(coll_errors)
+
     warnings = [w for sig in signatures_out for w in sig["warnings"]]
     metrics = plan_metrics(job, signatures)
     result = {
@@ -103,6 +111,8 @@ def compute_plan(job: JobInput, signatures: list[SignatureSpec]) -> dict:
         "totals": metrics,
         "validation": {"ok": True, "errors": [], "warnings": warnings},
     }
+    if collating is not None:
+        result["collating_marks"] = collating
     result["input_hash"] = hashlib.sha256(
         (
             job_fingerprint(job) + ":" + selection_fingerprint(signatures)

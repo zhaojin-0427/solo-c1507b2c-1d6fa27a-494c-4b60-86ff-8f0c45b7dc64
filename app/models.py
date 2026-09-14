@@ -120,6 +120,30 @@ class SignatureSpec(BaseModel):
         return self
 
 
+class CollatingMarksConfig(BaseModel):
+    """书脊配帖标（阶梯标）配置。
+
+    每帖一枚黑色小标，印在折好书芯的书脊边上，逐帖沿书脊错开形成阶梯，
+    供配帖时核对帖序。标记宽为垂直书脊方向（自书脊边向书芯内延伸），
+    高为沿书脊方向；超出每列帖数后另起一列（向书芯内错开列间距）。
+    安全余量 = 书脊两端（天头/地脚侧）留白 + 与套准标记的最小净距。
+    """
+
+    mark_width_mm: float = Field(gt=0, description="标记宽 mm（垂直书脊方向）")
+    mark_height_mm: float = Field(gt=0, description="标记高 mm（沿书脊方向）")
+    start_offset_mm: float = Field(
+        default=10.0, ge=0, description="首枚标记沿书脊距书脊起点的偏移 mm"
+    )
+    step_mm: float = Field(gt=0, description="同列相邻标记沿书脊的步距 mm")
+    per_column: int = Field(ge=1, description="每列帖数（超出后另起一列）")
+    column_spacing_mm: float = Field(
+        default=4.0, gt=0, description="列间距 mm（垂直书脊方向）"
+    )
+    safety_mm: float = Field(
+        default=3.0, ge=0, description="安全余量 mm（书脊两端留白与套准标记净距）"
+    )
+
+
 class JobInput(BaseModel):
     """拼版任务输入。"""
 
@@ -139,6 +163,9 @@ class JobInput(BaseModel):
     )
     locked_signatures: list[SignatureSpec] = Field(
         default_factory=list, description="已确认锁定的折帖（书首起的前缀）"
+    )
+    collating_marks: Optional[CollatingMarksConfig] = Field(
+        default=None, description="书脊配帖标配置（缺省不生成，行为与旧版一致）"
     )
 
     @model_validator(mode="after")

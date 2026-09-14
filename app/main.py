@@ -171,26 +171,34 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     @app.get("/api/plans/{plan_id}/export")
     def plan_export(plan_id: str) -> dict:
-        """制版用 JSON：每张印张正反面的页码、旋转与坐标。"""
+        """制版用 JSON：每张印张正反面的页码、旋转与坐标（含配帖标）。"""
         row = _load(plan_id)
         if row is None:
             return JSONResponse(status_code=404, content={"detail": "方案不存在"})
         result = json.loads(row["result_json"])
+        collating = result.get("collating_marks")
         plates = []
         for sig in result["signatures"]:
             for sheet in sig["sheets"]:
                 for side in ("front", "back"):
-                    plates.append(
-                        {
-                            "signature": sig["index"],
-                            "sheet": sheet["index"],
-                            "side": side,
-                            "creep_offset_mm": sheet["creep_offset_mm"],
-                            "marks": sheet["marks"],
-                            "pages": sheet[side]["cells"],
-                        }
-                    )
-        return {
+                    plate = {
+                        "signature": sig["index"],
+                        "sheet": sheet["index"],
+                        "side": side,
+                        "creep_offset_mm": sheet["creep_offset_mm"],
+                        "marks": sheet["marks"],
+                        "pages": sheet[side]["cells"],
+                    }
+                    if collating is not None:
+                        plate["collating_marks"] = [
+                            m
+                            for m in collating["marks"]
+                            if m["signature"] == sig["index"]
+                            and m["sheet"] == sheet["index"]
+                            and m["side"] == side
+                        ]
+                    plates.append(plate)
+        out = {
             "id": row["id"],
             "version": row["version"],
             "input_hash": result["input_hash"],
@@ -198,6 +206,14 @@ def create_app(db_path: str | None = None) -> FastAPI:
             "coordinate_origin": "paper top-left, x right, y down; back side viewed from back",
             "plates": plates,
         }
+        if collating is not None:
+            out["collating_marks"] = {
+                "spine_length_mm": collating["spine_length_mm"],
+                "usable_range_mm": collating["usable_range_mm"],
+                "spine_pattern": collating["spine_pattern"],
+                "spine_check": collating["spine_check"],
+            }
+        return out
 
     @app.get("/api/plans/{plan_id}/verify")
     def plan_verify(plan_id: str) -> dict:

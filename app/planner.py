@@ -12,6 +12,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from .errors import DomainError, err
+from .collating import compute_collating
 from .folding import GRIDS, build_program
 from .imposition import check_spec, effective_printable
 from .models import JobInput, SignatureSpec
@@ -109,17 +110,26 @@ def generate_candidates(job: JobInput) -> list[dict]:
                 if e["message"] not in seen_msg:
                     seen_msg.add(e["message"])
                     errors.append(e)
-        candidates.append(
-            {
-                "signatures": [
-                    {"pages": s.pages, "style": s.style.value, "sheets": s.sheets}
-                    for s in signatures
-                ],
-                "metrics": plan_metrics(job, signatures),
-                "valid": not errors,
-                "errors": errors,
-            }
-        )
+        collating = None
+        if job.collating_marks is not None:
+            # 配帖标：锁定前缀保留原编号，剩余帖续排；冲突计入候选可行性
+            collating, coll_errors = compute_collating(job, signatures, printable)
+            for e in coll_errors:
+                if e["message"] not in seen_msg:
+                    seen_msg.add(e["message"])
+                    errors.append(e)
+        candidate = {
+            "signatures": [
+                {"pages": s.pages, "style": s.style.value, "sheets": s.sheets}
+                for s in signatures
+            ],
+            "metrics": plan_metrics(job, signatures),
+            "valid": not errors,
+            "errors": errors,
+        }
+        if collating is not None:
+            candidate["collating"] = collating
+        candidates.append(candidate)
 
     def sort_key(c: dict):
         m = c["metrics"]

@@ -162,7 +162,40 @@ def _panel(result: dict, sig: dict, sheet: dict, side: str, s: float, dy: float)
     # 套准标记
     for m in sheet["marks"]:
         el.append(_mark(ox + m["x"] * s, oy + m["y"] * s, s))
+    # 书脊配帖标（该帖最外层印张的对应面）
+    for cm in result.get("collating_marks", {}).get("marks", []):
+        if (
+            cm["signature"] == sig["index"]
+            and cm["sheet"] == sheet["index"]
+            and cm["side"] == side
+        ):
+            el.append(_collating_mark(cm, s, ox, oy))
     return el, pw, ph
+
+
+def _collating_mark(cm: dict, s: float, ox: float, oy: float) -> str:
+    """绘制一枚配帖标：黑色实底矩形 + 帖号标注（title 含全部制版信息）。"""
+    x = ox + cm["x"] * s
+    y = oy + cm["y"] * s
+    w = cm["width"] * s
+    h = cm["height"] * s
+    side_text = "正面" if cm["side"] == "front" else "背面"
+    tip = (
+        f"帖{cm['mark_number']} 配帖标 · 页{cm['page_start']}-{cm['page_end']} · "
+        f"印张{cm['sheet'] + 1} · {side_text} · "
+        f"({cm['x']}, {cm['y']}) {cm['width']}×{cm['height']}mm · "
+        f"旋转{cm['rotation']}° · 书脊 {cm['spine_start_mm']}-{cm['spine_end_mm']}mm"
+    )
+    cx, cy = x + w / 2, y + h / 2
+    return (
+        f'<g><title>{_esc(tip)}</title>'
+        f'<rect x="{_f(x)}" y="{_f(y)}" width="{_f(w)}" height="{_f(h)}" '
+        f'fill="#111" stroke="none"/>'
+        f'<text x="{_f(cx)}" y="{_f(cy)}" font-size="{_f(max(4.0, min(w, h) * 0.45))}" '
+        f'fill="#fff" text-anchor="middle" dominant-baseline="central" '
+        f'font-family="sans-serif" transform="rotate({cm["rotation"]} {_f(cx)} {_f(cy)})">'
+        f'{cm["mark_number"]}</text></g>'
+    )
 
 
 def _svg_doc(width: float, height: float, body: list[str]) -> str:
@@ -178,8 +211,77 @@ def _svg_doc(width: float, height: float, body: list[str]) -> str:
     )
 
 
+COLL_PANEL_PAD_TOP = 26.0
+COLL_ROW_H = 26.0
+COLL_PANEL_BOTTOM = 30.0
+
+
+def _collating_panel(result: dict, dy: float) -> tuple[list[str], float]:
+    """书脊配帖标阶梯面板：书脊条 + 逐帖阶梯黑标（按书脊顺序标注帖号）。
+
+    返回 (元素, 面板高px)。横向为沿书脊方向，纵向为列（向书芯内错开）。
+    """
+    coll = result["collating_marks"]
+    cfg = result["job"]["collating_marks"]
+    spine = coll["spine_length_mm"]
+    lo, hi = coll["usable_range_mm"]
+    s = (SCALE_TARGET - 2 * PAD) / spine
+    n_cols = max((m["column"] for m in coll["marks"]), default=0) + 1
+    row_h = max(COLL_ROW_H, cfg["mark_width_mm"] * s + 8.0)
+    bar_h = n_cols * row_h
+    bar_y = dy + COLL_PANEL_PAD_TOP
+    height = COLL_PANEL_PAD_TOP + bar_h + COLL_PANEL_BOTTOM
+    title = (
+        f"书脊配帖标阶梯 · 书脊长 {spine}mm · 可用 [{lo}, {hi}]mm · "
+        f"共 {len(coll['marks'])} 帖"
+    )
+    el = [
+        f'<text x="{_f(PAD)}" y="{_f(dy + 16)}" font-size="13" '
+        f'font-family="sans-serif" fill="#222">{_esc(title)}</text>',
+        f'<rect x="{_f(PAD)}" y="{_f(bar_y)}" width="{_f(spine * s)}" '
+        f'height="{_f(bar_h)}" fill="#fff" stroke="#333" stroke-width="1"/>',
+    ]
+    # 两端安全余量区
+    if lo > 0:
+        el.append(
+            f'<rect x="{_f(PAD)}" y="{_f(bar_y)}" width="{_f(lo * s)}" '
+            f'height="{_f(bar_h)}" fill="#f0f0f0" stroke="none"/>'
+        )
+    if hi < spine:
+        el.append(
+            f'<rect x="{_f(PAD + hi * s)}" y="{_f(bar_y)}" '
+            f'width="{_f((spine - hi) * s)}" height="{_f(bar_h)}" '
+            f'fill="#f0f0f0" stroke="none"/>'
+        )
+    el.append(
+        f'<text x="{_f(PAD - 8)}" y="{_f(bar_y + bar_h / 2)}" font-size="9" fill="#666" '
+        f'text-anchor="end" dominant-baseline="central" font-family="sans-serif">头</text>'
+    )
+    el.append(
+        f'<text x="{_f(PAD + spine * s + 8)}" y="{_f(bar_y + bar_h / 2)}" font-size="9" '
+        f'fill="#666" text-anchor="start" dominant-baseline="central" '
+        f'font-family="sans-serif">尾</text>'
+    )
+    # 阶梯黑标（按书脊顺序）
+    mark_h = cfg["mark_height_mm"] * s
+    mark_w = cfg["mark_width_mm"] * s
+    for p in coll["spine_pattern"]:
+        x = PAD + p["spine_start_mm"] * s
+        y = bar_y + p["column"] * row_h + (row_h - mark_w) / 2
+        el.append(
+            f'<rect x="{_f(x)}" y="{_f(y)}" width="{_f(mark_h)}" '
+            f'height="{_f(mark_w)}" fill="#111" stroke="none"/>'
+        )
+        el.append(
+            f'<text x="{_f(x + mark_h / 2)}" y="{_f(bar_y + bar_h + 12)}" font-size="8" '
+            f'fill="#444" text-anchor="middle" font-family="sans-serif">'
+            f'帖{p["mark_number"]}</text>'
+        )
+    return el, height
+
+
 def render_overview(result: dict) -> str:
-    """整案预览：所有印张正反面依次排列。"""
+    """整案预览：所有印张正反面依次排列（配置配帖标时前置书脊阶梯面板）。"""
     paper = result["job"]["paper"]
     s = SCALE_TARGET / max(paper["width"], paper["height"])
     panels: list[tuple[dict, dict, str]] = []
@@ -190,6 +292,11 @@ def render_overview(result: dict) -> str:
     body: list[str] = []
     y = 0.0
     width = 0.0
+    if "collating_marks" in result:
+        el, ph = _collating_panel(result, y)
+        body.extend(el)
+        y += ph
+        width = max(width, SCALE_TARGET)
     for sig, sheet, side in panels:
         el, pw, ph = _panel(result, sig, sheet, side, s, y)
         body.extend(el)
