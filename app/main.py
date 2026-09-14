@@ -213,6 +213,140 @@ def create_app(db_path: str | None = None) -> FastAPI:
         consistent = recomputed == row["result_json"]
         return {"id": row["id"], "version": row["version"], "consistent": consistent}
 
+    # ------------------------------------------------------------------
+    # 锁线装订方案：引用不可变拼版方案，搜索孔位与走线，冻结快照保存
+    # ------------------------------------------------------------------
+    def _source_snapshot(plan_id: str) -> dict:
+        row = app.state.store.get(plan_id)
+        if row is None:
+            raise DomainError(
+                [err("PLAN_NOT_FOUND", f"来源拼版方案 {plan_id} 不存在")]
+            )
+        return snapshot_from_plan(row)
+
+    @app.post("/api/sewing-plans/candidates")
+    def sewing_candidates_endpoint(params: SewingParams) -> dict:
+        """搜索锁线孔位与走线候选，按违规数、换线次数、总线长、孔位改动排序。"""
+        snapshot = _source_snapshot(params.plan_id)
+        cands = sewing_candidates(snapshot, params)
+        return {
+            "input_hash": sewing_fingerprint(snapshot, params),
+            "source": {
+                "plan_id": snapshot["plan_id"],
+                "plan_version": snapshot["plan_version"],
+                "signature_count": len(snapshot["signatures"]),
+                "spine_length_mm": cands[0]["spine_length_mm"],
+            },
+            "candidates": cands,
+        }
+
+    @app.post("/api/sewing-plans", status_code=201)
+    def save_sewing_plan(req: SaveSewingPlanRequest) -> dict:
+        """选定候选并保存为不可变锁线方案（冻结来源快照与参数，幂等）。"""
+        params = req.to_params()
+        snapshot = _source_snapshot(params.plan_id)
+        cands = sewing_candidates(snapshot, params)
+        if req.candidate_index >= len(cands):
+            raise DomainError(
+                [
+                    err(
+                        "BAD_CANDIDATE",
+                        f"候选序号 {req.candidate_index} 超出范围（共 {len(cands)} 个）",
+                    )
+                ]
+            )
+        chosen = cands[req.candidate_index]
+        record = app.state.sewing_store.save(
+            name=req.name or f"锁线-{snapshot['plan_id']}",
+            plan_id=snapshot["plan_id"],
+            plan_version=snapshot["plan_version"],
+            input_hash=sewing_fingerprint(snapshot, params),
+            request_json=canonical_json(params.model_dump(mode="json")),
+            snapshot_json=canonical_json(snapshot),
+            result_json=canonical_json(chosen),
+            metrics_json=canonical_json(chosen["metrics"]),
+        )
+        record["metrics"] = json.loads(record["metrics"])
+        return record
+
+    @app.get("/api/sewing-plans")
+    def list_sewing_plans() -> list[dict]:
+        return app.state.sewing_store.list()
+
+    def _load_sewing(sew_id: str):
+        return app.state.sewing_store.get(sew_id)
+
+    @app.get("/api/sewing-plans/{sew_id}")
+    def get_sewing_plan(sew_id: str) -> dict:
+        row = _load_sewing(sew_id)
+        if row is None:
+            return JSONResponse(status_code=404, content={"detail": "锁线方案不存在"})
+        return {
+            "id": row["id"],
+            "version": row["version"],
+            "name": row["name"],
+            "created_at": row["created_at"],
+            "input_hash": row["input_hash"],
+            "source": json.loads(row["snapshot_json"]),
+            "result": json.loads(row["result_json"]),
+        }
+
+    @app.get("/api/sewing-plans/{sew_id}/svg")
+    def sewing_plan_svg(
+        sew_id: str,
+        signature: int | None = Query(default=None),
+    ) -> Response:
+        """打孔模板 SVG：默认逐帖整案；指定 signature（帖序号）时输出单帖。"""
+        row = _load_sewing(sew_id)
+        if row is None:
+            return JSONResponse(status_code=404, content={"detail": "锁线方案不存在"})
+        result = json.loads(row["result_json"])
+        if signature is None:
+            return Response(
+                content=render_all_templates(result), media_type="image/svg+xml"
+            )
+        if signature < 0 or signature >= len(result["signatures"]):
+            return JSONResponse(status_code=404, content={"detail": "帖序号超出范围"})
+        return Response(
+            content=render_signature_template(result, signature),
+            media_type="image/svg+xml",
+        )
+
+    @app.get("/api/sewing-plans/{sew_id}/steps")
+    def sewing_plan_steps(sew_id: str) -> dict:
+        """逐帖操作顺序：进针、出针、绕带、换帖与收线。"""
+        row = _load_sewing(sew_id)
+        if row is None:
+            return JSONResponse(status_code=404, content={"detail": "锁线方案不存在"})
+        result = json.loads(row["result_json"])
+        return {
+            "id": row["id"],
+            "signatures": [
+                {
+                    "index": sig["index"],
+                    "direction": sig["direction"],
+                    "operations": sig["operations"],
+                }
+                for sig in result["signatures"]
+            ],
+            "thread_paths": result["thread_paths"],
+            "unclosed_paths": result["unclosed_paths"],
+        }
+
+    @app.get("/api/sewing-plans/{sew_id}/verify")
+    def sewing_plan_verify(sew_id: str) -> dict:
+        """重算校验：按冻结的来源快照与参数重算，结果必须一致。"""
+        row = _load_sewing(sew_id)
+        if row is None:
+            return JSONResponse(status_code=404, content={"detail": "锁线方案不存在"})
+        params = SewingParams(**json.loads(row["request_json"]))
+        snapshot = json.loads(row["snapshot_json"])
+        cands = sewing_candidates(snapshot, params)
+        consistent = any(
+            canonical_json(c) == row["result_json"] for c in cands
+        )
+        return {"id": row["id"], "version": row["version"], "consistent": consistent}
+
     return app
 
 
