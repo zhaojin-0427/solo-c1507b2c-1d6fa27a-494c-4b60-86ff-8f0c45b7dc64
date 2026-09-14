@@ -41,7 +41,22 @@ def _plan(job_dict, sigs=None):
 def test_unconfigured_responses_unchanged(client, job_payload):
     r = client.post("/api/compute", json={"job": job_payload, "candidate_index": 0})
     assert r.status_code == 200
-    assert "collating_marks" not in r.json()
+    body = r.json()
+    assert "collating_marks" not in body
+    assert "collating_marks" not in body["job"]  # 旧响应的 job 不含此键
+    # 显式传 null 与不传完全等价（响应与哈希）
+    explicit_null = dict(job_payload, collating_marks=None)
+    r2 = client.post("/api/compute", json={"job": explicit_null, "candidate_index": 0})
+    assert r2.text == r.text
+    # job_hash 基于剔除该键后的序列化，与旧版一致
+    import hashlib
+
+    from app.service import canonical_json
+
+    r3 = client.post("/api/candidates", json=job_payload)
+    assert r3.json()["job_hash"] == hashlib.sha256(
+        canonical_json(body["job"]).encode()
+    ).hexdigest()
     r = client.post("/api/candidates", json=job_payload)
     assert "collating" not in r.json()["candidates"][0]
     rec = client.post(
@@ -199,6 +214,47 @@ def test_overlap_locates_signature_pair(client, coll_job):
     r = client.post("/api/plans", json={"job": coll_job, "candidate_index": 0})
     assert r.status_code == 422
     assert r.json()["detail"][0]["code"] == "MARK_OVERLAP"
+
+
+def test_overlap_checked_across_all_pairs(client, coll_job):
+    """跨列跨帖号：列间距 < 标记宽时帖1(列0)与帖3(列1)相交 -> 同样定位。"""
+    coll_job["safety_mm"] = 8  # 列1 外沿 2+4=6，不触发安全区侵入
+    coll_job["collating_marks"]["per_column"] = 2
+    coll_job["collating_marks"]["column_spacing_mm"] = 2  # < 标记宽 4
+    sigs = [{"pages": 16, "style": "standard"}] * 4
+    r = client.post("/api/compute", json={"job": coll_job, "signatures": sigs})
+    assert r.status_code == 422
+    first = r.json()["detail"][0]
+    assert first["code"] == "MARK_OVERLAP"
+    assert "帖1" in first["message"] and "帖3" in first["message"]
+    # 帖2与帖4 同样相交，全部报告
+    msgs = [e["message"] for e in r.json()["detail"] if e["code"] == "MARK_OVERLAP"]
+    assert any("帖2" in m and "帖4" in m for m in msgs)
+
+
+def test_conflict_response_includes_collating(client, coll_job):
+    """冲突时 422 响应一并返回阶梯图案、每帖位置与首个冲突。"""
+    coll_job["collating_marks"]["step_mm"] = 3
+    r = client.post("/api/compute", json={"job": coll_job, "candidate_index": 0})
+    assert r.status_code == 422
+    body = r.json()
+    assert body["detail"][0]["code"] == "MARK_OVERLAP"
+    coll = body["collating_marks"]
+    assert len(coll["marks"]) == 4  # 每帖位置
+    assert coll["spine_pattern"]  # 书脊阶梯图案
+    assert coll["spine_check"]
+    fc = coll["first_conflict"]
+    assert fc["code"] == "MARK_OVERLAP" and fc["mark_number"] == 2
+    # 显式折帖序列路径同样携带
+    sigs = [{"pages": 16, "style": "standard"}] * 4
+    r = client.post("/api/compute", json={"job": coll_job, "signatures": sigs})
+    assert r.status_code == 422
+    assert "collating_marks" in r.json()
+    # 保存请求同样携带且不落库
+    r = client.post("/api/plans", json={"job": coll_job, "candidate_index": 0})
+    assert r.status_code == 422
+    assert "collating_marks" in r.json()
+    assert client.get("/api/plans").json() == []
 
 
 def test_register_mark_collision(client, coll_job):

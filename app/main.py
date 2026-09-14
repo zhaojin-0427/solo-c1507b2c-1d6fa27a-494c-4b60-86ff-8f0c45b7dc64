@@ -14,6 +14,7 @@ from .planner import generate_candidates
 from .service import (
     canonical_json,
     compute_plan,
+    job_dump,
     job_fingerprint,
     resolve_selection,
     selection_fingerprint,
@@ -41,7 +42,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     @app.exception_handler(DomainError)
     async def domain_error_handler(_: Request, exc: DomainError) -> JSONResponse:
-        return JSONResponse(status_code=422, content={"detail": exc.errors})
+        content = {"detail": exc.errors}
+        if exc.payload:
+            content.update(exc.payload)
+        return JSONResponse(status_code=422, content=content)
 
     # ------------------------------------------------------------------
     @app.get("/health")
@@ -89,7 +93,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
             name=req.name or req.job.job_name,
             job_hash=job_fingerprint(req.job),
             selection_hash=selection_fingerprint(signatures),
-            input_json=canonical_json(req.job.model_dump(mode="json")),
+            input_json=canonical_json(job_dump(req.job)),
             selection_json=canonical_json(
                 [
                     {"pages": s.pages, "style": s.style.value, "sheets": s.sheets}

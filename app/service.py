@@ -21,8 +21,16 @@ def canonical_json(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def job_dump(job: JobInput) -> dict:
+    """任务序列化：未配置配帖标时剔除该键，保持旧响应与哈希不变。"""
+    d = job.model_dump(mode="json")
+    if d.get("collating_marks") is None:
+        d.pop("collating_marks", None)
+    return d
+
+
 def job_fingerprint(job: JobInput) -> str:
-    return hashlib.sha256(canonical_json(job.model_dump(mode="json")).encode()).hexdigest()
+    return hashlib.sha256(canonical_json(job_dump(job)).encode()).hexdigest()
 
 
 def selection_fingerprint(signatures: list[SignatureSpec]) -> str:
@@ -66,7 +74,11 @@ def resolve_selection(
         )
     chosen = candidates[idx]
     if not chosen["valid"]:
-        raise DomainError(chosen["errors"])
+        # 候选无效（含配帖标冲突）：422 响应一并携带阶梯图案与首个冲突
+        payload = (
+            {"collating_marks": chosen["collating"]} if "collating" in chosen else None
+        )
+        raise DomainError(chosen["errors"], payload=payload)
     return [SignatureSpec(**s) for s in chosen["signatures"]]
 
 
@@ -96,17 +108,18 @@ def compute_plan(job: JobInput, signatures: list[SignatureSpec]) -> dict:
     if page_errors:
         raise DomainError(page_errors)
 
-    # 书脊配帖标：冲突（越出书脊/侵入安全区/重叠/碰套准标）定位帖号并拒绝
+    # 书脊配帖标：冲突（越出书脊/侵入安全区/重叠/碰套准标）定位帖号并拒绝，
+    # 422 响应一并携带阶梯图案、每帖位置与首个冲突
     collating = None
     if job.collating_marks is not None:
         collating, coll_errors = compute_collating(job, signatures, printable)
         if coll_errors:
-            raise DomainError(coll_errors)
+            raise DomainError(coll_errors, payload={"collating_marks": collating})
 
     warnings = [w for sig in signatures_out for w in sig["warnings"]]
     metrics = plan_metrics(job, signatures)
     result = {
-        "job": job.model_dump(mode="json"),
+        "job": job_dump(job),
         "signatures": signatures_out,
         "totals": metrics,
         "validation": {"ok": True, "errors": [], "warnings": warnings},

@@ -15,7 +15,7 @@
 冲突检测（均定位到具体帖号，首个冲突 = 按帖序的首个违规）：
 - MARK_SPINE_OVERFLOW   标记超出书脊可用长度（两端扣除安全余量）；
 - MARK_SAFETY_INTRUSION 标记外沿侵入成品安全区（job.safety_mm）；
-- MARK_OVERLAP          相邻两帖标记在书脊平面内重叠；
+- MARK_OVERLAP          任意两枚标记在书脊平面内重叠（含跨列、跨帖号）；
 - MARK_HITS_REGISTER    标记与套准十字标记净距不足（安全余量 + 十字半径）。
 """
 from __future__ import annotations
@@ -61,7 +61,7 @@ def compute_collating(
     marks: list[dict] = []
     errors: list[dict] = []
     first_conflict: dict | None = None
-    prev_rect: tuple[float, float, float, float] | None = None  # 书脊平面 (d0,d1,p0,p1)
+    placed: list[tuple[float, float, float, float]] = []  # 已放置标记的书脊平面矩形
     page_base = 0
 
     def conflict(code: str, message: str, sig_index: int) -> None:
@@ -167,20 +167,22 @@ def compute_collating(
                 i,
             )
         cur = (d, d + mh_cfg, perp, perp + mw_cfg)
-        if (
-            prev_rect is not None
-            and prev_rect[0] < cur[1] - EPS
-            and cur[0] < prev_rect[1] - EPS
-            and prev_rect[2] < cur[3] - EPS
-            and cur[2] < prev_rect[3] - EPS
-        ):
-            conflict(
-                "MARK_OVERLAP",
-                f"帖{i} 与帖{i + 1} 配帖标重叠"
-                f"（沿书脊 [{r3(cur[0])}, {r3(cur[1])}]mm 与上一枚相交）",
-                i,
-            )
-        prev_rect = cur
+        # 与所有已放置标记两两检查（同列步距不足、跨列列距不足均会相交）
+        for j, prev in enumerate(placed):
+            if (
+                prev[0] < cur[1] - EPS
+                and cur[0] < prev[1] - EPS
+                and prev[2] < cur[3] - EPS
+                and cur[2] < prev[3] - EPS
+            ):
+                conflict(
+                    "MARK_OVERLAP",
+                    f"帖{j + 1} 与帖{i + 1} 配帖标重叠（沿书脊 "
+                    f"[{r3(prev[0])}, {r3(prev[1])}]mm 与 "
+                    f"[{r3(cur[0])}, {r3(cur[1])}]mm 相交）",
+                    i,
+                )
+        placed.append(cur)
 
         # 套准标记碰撞：该面坐标系下，标记矩形外扩 (安全余量+十字半径) 后含十字心
         off = job.bleed_mm + job.marks_margin_mm / 2
